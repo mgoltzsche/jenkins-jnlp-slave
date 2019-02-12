@@ -1,0 +1,54 @@
+#!/bin/sh
+
+# This script delegates docker commands to podman while transforming
+# a few in order to be compatibile with docker/jenkins workflow plugin
+
+case "$1" in
+	'-v')
+		# Fake docker version (workaround for workflow plugin:
+		# see https://github.com/jenkinsci/docker-workflow-plugin/blob/490548c08416997ed0168c29ff3ea5f7bb06e963/src/main/java/org/jenkinsci/plugins/docker/workflow/WithContainerStep.java#L144
+		# and https://github.com/jenkinsci/docker-workflow-plugin/blob/490548c08416997ed0168c29ff3ea5f7bb06e963/src/main/java/org/jenkinsci/plugins/docker/workflow/client/DockerClient.java#L247)
+		echo 'Docker version 18.06.1-ce, build e68fc7a'
+	;;
+	run)
+		# Inject oom-score-adj from host in order to run
+		# within container with limited resources
+		shift
+		OOMSCORE=$(cat /proc/self/oom_score_adj)
+		if [ "$1 $2 $3" = '-t -d -u' ]; then
+			# Remove user mapping (since already mapped;
+			# workflow plugin workaround, see https://github.com/jenkinsci/docker-workflow-plugin/blob/490548c08416997ed0168c29ff3ea5f7bb06e963/src/main/java/org/jenkinsci/plugins/docker/workflow/client/DockerClient.java#L344)
+			shift 4
+			exec /usr/local/bin/podman run -t -d --oom-score-adj "$OOMSCORE" "$@"
+		else
+			exec /usr/local/bin/podman run --oom-score-adj "$OOMSCORE" "$@"
+		fi
+	;;
+	inspect)
+		# Convert {{.Image}} to {{.ImageID}} (workaround for docker compatibility / workflow plugin:
+		# see https://github.com/jenkinsci/docker-workflow-plugin/blob/490548c08416997ed0168c29ff3ea5f7bb06e963/src/main/java/org/jenkinsci/plugins/docker/workflow/client/DockerClient.java#L344;
+		# also podman ignores errors: https://github.com/containers/libpod/pull/2181)
+		shift
+		if [ "$1" = '-f' -a "$2" = '{{.Image}}' ]; then
+			shift 2
+			exec /usr/local/bin/podman inspect -f '{{.ImageID}}' "$@"
+		else
+			exec /usr/local/bin/podman inspect "$@"
+		fi
+	;;
+	top)
+		# Convert ps format option (workaround for docker compatibility / workflow plugin:
+		# see https://github.com/jenkinsci/docker-workflow-plugin/blob/490548c08416997ed0168c29ff3ea5f7bb06e963/src/main/java/org/jenkinsci/plugins/docker/workflow/client/DockerClient.java#L140)
+		shift
+		if [ "$2" = '-eo' ]; then
+			CONTAINERID="$1"
+			shift 2
+			exec /usr/local/bin/podman top "$CONTAINERID" $(echo "$@" | sed -E 's/,/ /g')
+		else
+			exec /usr/local/bin/podman top "$@"
+		fi
+	;;
+	*)
+		exec /usr/local/bin/podman "$@"
+	;;
+esac
